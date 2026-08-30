@@ -6,6 +6,8 @@
 // Unfortunately, the board's rgb led and built in led share the same gpio
 const uint8_t pin_rgb_led = 48;
 const uint8_t pin_built_in_led = 48;
+const uint8_t pin_battery_voltage_in = 1;
+
 const uint8_t rgb_led_count = 1;
 
 Adafruit_NeoPixel rgb_led(rgb_led_count, pin_rgb_led, NEO_GRB + NEO_KHZ800);
@@ -68,6 +70,7 @@ void setup() {
   rgb_led.setPixelColor(0, rgb_led.Color(0, 1, 0));
   rgb_led.show();
   end_rgb_write();
+  pinMode(pin_battery_voltage_in, ANALOG);
 
   set_built_in_led(false);
 }
@@ -202,10 +205,65 @@ void update_morse_led(unsigned long ms) {
   }
 }
 
+// returns true if an n_ms boundary has passed between last_loop_ms and loop ms
+bool every_n_ms(uint32_t last_loop_ms, uint32_t loop_ms, uint32_t n_ms) {
+  if (n_ms == 0 || last_loop_ms == 0) return false;
+  return (last_loop_ms % n_ms) + (loop_ms - last_loop_ms) >= n_ms;
+}
+
+void log_battery_stats(uint32_t loop_ms) {
+  const float resistor_ohms = 10.0;
+  const float min_test_volts = 1.0;
+  const int sample_count = 16;
+  static uint32_t last_reading_ms = 0;
+  static float total_milliamp_hours = 0.0;
+  static float total_watt_hours = 0.0;
+  static bool test_done = false;
+
+  if (test_done) return;
+
+  uint32_t sample_sum_mv = 0;
+  for (int i = 0; i < sample_count; i++) {
+    sample_sum_mv += analogReadMilliVolts(pin_battery_voltage_in);
+  }
+  float v_bat = (sample_sum_mv / (float) sample_count) / 1000.0;
+
+  if (v_bat < min_test_volts) {
+    printf("v_bat: %4.2f below %4.2f, ending test. mah: %6.2f wh: %6.3f\n",
+           v_bat, min_test_volts, total_milliamp_hours, total_watt_hours);
+    test_done = true;
+    return;
+  }
+
+  float amps = v_bat / resistor_ohms;
+  float watts = v_bat * amps;
+
+  if (last_reading_ms != 0) {
+    // assume v_bat has been the current reading since the last reading
+    float elapsed_hours = (loop_ms - last_reading_ms) / 3600000.0;
+    total_milliamp_hours += amps * 1000.0 * elapsed_hours;
+    total_watt_hours += watts * elapsed_hours;
+  }
+
+  printf("uptime_seconds: %d v_bat: %4.2f amps: %5.3f watts: %5.3f mah: %6.2f wh: %6.3f\n",
+         millis()/1000, v_bat, amps, watts, total_milliamp_hours, total_watt_hours);
+  last_reading_ms = loop_ms;
+}
+
 void loop() {
-  const int loop_hz = 60;
-  auto ms = millis();
-  update_rgb_rainbow(ms);
-  update_morse_led(ms);
-  delay(1000 / loop_hz);
+  static int last_loop_ms = 0;
+  const int rgb_hz = 60;
+  auto loop_ms = millis();
+
+  if (every_n_ms(last_loop_ms, loop_ms, 1000 / rgb_hz)) {
+    update_rgb_rainbow(loop_ms);
+    update_morse_led(loop_ms);
+  }
+
+  if (every_n_ms(last_loop_ms, loop_ms, 1000)) {
+    log_battery_stats(loop_ms);
+  }
+
+  delay(1);
+  last_loop_ms = loop_ms;
 }
